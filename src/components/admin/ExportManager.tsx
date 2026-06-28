@@ -8,7 +8,6 @@ import {
   RefreshCw,
   FileArchive,
   Trash2,
-  ExternalLink,
   Pencil,
   X,
   Check,
@@ -18,6 +17,7 @@ import {
   BarChart2,
   Image,
   Layers,
+  ArrowLeft,
 } from 'lucide-react';
 import { useExport } from '../../hooks/useExport';
 import { triggerDownload, type ExportRun } from '../../lib/exportUtils';
@@ -85,9 +85,9 @@ function NotesCell({ run, onSave }: { run: ExportRun; onSave: (id: string, notes
   );
 }
 
-// ─── Stats modal ─────────────────────────────────────────────────────────────
+// ─── Full-page stats view ─────────────────────────────────────────────────────
 
-function StatsModal({ run, onClose }: { run: ExportRun; onClose: () => void }) {
+function StatsView({ run, onBack }: { run: ExportRun; onBack: () => void }) {
   const entityRows = Object.entries(run.entity_counts)
     .filter(([, v]) => v > 0)
     .sort(([, a], [, b]) => b - a);
@@ -97,127 +97,126 @@ function StatsModal({ run, onClose }: { run: ExportRun; onClose: () => void }) {
   const totalAssets = Object.values(run.asset_counts).reduce((s, v) => s + v, 0);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-card border border-border rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col">
-        {/* Header */}
-        <div className="flex items-start justify-between p-6 border-b border-border shrink-0">
-          <div className="flex items-start gap-3 min-w-0">
-            <div className="p-2 rounded-lg bg-primary/10 text-primary shrink-0">
-              <BarChart2 className="w-5 h-5" />
-            </div>
-            <div className="min-w-0">
-              <h3 className="font-bold text-lg">Export Contents</h3>
-              <p className="text-xs text-muted-foreground font-mono truncate mt-0.5">{run.filename}</p>
-            </div>
-          </div>
-          <button onClick={onClose} className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shrink-0">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+    <div className="space-y-8">
+      {/* Back nav */}
+      <button
+        onClick={onBack}
+        className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
+      >
+        <ArrowLeft className="w-4 h-4" />
+        Back to Export History
+      </button>
 
-        {/* Summary badges */}
-        <div className="px-6 pt-5 pb-3 grid grid-cols-3 gap-3 shrink-0">
-          <div className="flex flex-col items-center justify-center p-3 rounded-xl bg-secondary gap-1">
-            <span className="text-2xl font-bold tabular-nums">{totalRecords.toLocaleString()}</span>
-            <span className="text-xs text-muted-foreground">Total Records</span>
+      {/* Header */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div className="flex items-start gap-4">
+          <div className="p-3 rounded-xl bg-primary/10 text-primary shrink-0">
+            <BarChart2 className="w-7 h-7" />
           </div>
-          <div className="flex flex-col items-center justify-center p-3 rounded-xl bg-secondary gap-1">
-            <span className="text-2xl font-bold tabular-nums">{totalAssets}</span>
-            <span className="text-xs text-muted-foreground">Asset Files</span>
-          </div>
-          <div className="flex flex-col items-center justify-center p-3 rounded-xl bg-secondary gap-1">
-            <span className="text-2xl font-bold">{formatBytes(run.file_size_bytes)}</span>
-            <span className="text-xs text-muted-foreground">Archive Size</span>
+          <div>
+            <h3 className="text-2xl font-bold">Export Contents</h3>
+            <p className="text-sm text-muted-foreground font-mono mt-0.5">{run.filename}</p>
           </div>
         </div>
+        <button
+          onClick={() => triggerDownload(run.public_url, run.filename)}
+          className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors font-medium text-sm"
+        >
+          <Download className="w-4 h-4" />
+          Download ZIP
+        </button>
+      </div>
 
-        {/* Scrollable content */}
-        <div className="overflow-y-auto flex-1 px-6 pb-6 space-y-5">
-          {/* Entity counts */}
-          {entityRows.length > 0 && (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                <Database className="w-3.5 h-3.5" />
-                Data Tables ({entityRows.length} non-empty)
-              </div>
-              <div className="space-y-1.5">
-                {entityRows.map(([name, count]) => {
-                  const maxCount = entityRows[0][1];
-                  const pct = maxCount > 0 ? Math.max(4, Math.round((count / maxCount) * 100)) : 4;
-                  return (
-                    <div key={name} className="flex items-center gap-3">
-                      <span className="text-xs text-muted-foreground w-44 shrink-0 truncate font-mono">
-                        {name.replace(/_/g, ' ')}
-                      </span>
-                      <div className="flex-1 h-5 rounded bg-secondary overflow-hidden relative">
-                        <div
-                          className="h-full rounded bg-primary/30 transition-all"
-                          style={{ width: `${pct}%` }}
-                        />
-                        <span className="absolute inset-0 flex items-center px-2 text-xs font-semibold tabular-nums">
-                          {count.toLocaleString()}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
+      {/* Summary stats */}
+      <div className="grid grid-cols-3 gap-4">
+        <div className="flex flex-col items-center justify-center p-5 rounded-xl border border-border bg-secondary gap-1.5">
+          <span className="text-3xl font-bold tabular-nums">{totalRecords.toLocaleString()}</span>
+          <span className="text-sm text-muted-foreground">Total Records</span>
+        </div>
+        <div className="flex flex-col items-center justify-center p-5 rounded-xl border border-border bg-secondary gap-1.5">
+          <span className="text-3xl font-bold tabular-nums">{totalAssets}</span>
+          <span className="text-sm text-muted-foreground">Asset Files</span>
+        </div>
+        <div className="flex flex-col items-center justify-center p-5 rounded-xl border border-border bg-secondary gap-1.5">
+          <span className="text-3xl font-bold">{formatBytes(run.file_size_bytes)}</span>
+          <span className="text-sm text-muted-foreground">Archive Size</span>
+        </div>
+      </div>
 
-          {/* Asset counts */}
-          {assetRows.length > 0 && (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                <Image className="w-3.5 h-3.5" />
-                Asset Folders
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                {assetRows.map(([folder, count]) => (
-                  <div key={folder} className="flex items-center justify-between px-3 py-2.5 rounded-lg border border-border bg-background">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Layers className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                      <span className="text-sm truncate">{folder}</span>
-                    </div>
-                    <span className="text-sm font-semibold tabular-nums ml-2 shrink-0">{count}</span>
+      {/* Entity counts bar chart */}
+      {entityRows.length > 0 && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            <Database className="w-3.5 h-3.5" />
+            Data Tables — {entityRows.length} non-empty
+          </div>
+          <div className="space-y-2">
+            {entityRows.map(([name, count]) => {
+              const maxCount = entityRows[0][1];
+              const pct = maxCount > 0 ? Math.max(2, Math.round((count / maxCount) * 100)) : 2;
+              return (
+                <div key={name} className="flex items-center gap-4">
+                  <span className="text-xs text-muted-foreground w-48 shrink-0 truncate font-mono">
+                    {name.replace(/_/g, ' ')}
+                  </span>
+                  <div className="flex-1 h-6 rounded-lg bg-secondary overflow-hidden relative">
+                    <div
+                      className="h-full rounded-lg bg-primary/25 transition-all"
+                      style={{ width: `${pct}%` }}
+                    />
+                    <span className="absolute inset-0 flex items-center px-3 text-xs font-semibold tabular-nums">
+                      {count.toLocaleString()}
+                    </span>
                   </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Meta */}
-          <div className="space-y-2 pt-1 border-t border-border">
-            <div className="flex justify-between text-sm">
-              <span className="text-muted-foreground">Exported at</span>
-              <span className="font-medium">{formatDate(run.exported_at)}</span>
-            </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-muted-foreground">Storage path</span>
-              <span className="font-mono text-xs text-muted-foreground">{run.storage_path}</span>
-            </div>
-            {run.notes && (
-              <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">Notes</span>
-                <span className="font-medium max-w-xs text-right">{run.notes}</span>
-              </div>
-            )}
+                </div>
+              );
+            })}
           </div>
         </div>
+      )}
 
-        {/* Footer */}
-        <div className="p-4 border-t border-border shrink-0 flex justify-between items-center">
-          <button
-            onClick={() => { triggerDownload(run.public_url, run.filename); onClose(); }}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors text-sm font-medium"
-          >
-            <Download className="w-4 h-4" />
-            Download
-          </button>
-          <button onClick={onClose} className="px-4 py-2 rounded-lg border border-border hover:bg-accent transition-colors text-sm">
-            Close
-          </button>
+      {/* Asset folders */}
+      {assetRows.length > 0 && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            <Image className="w-3.5 h-3.5" />
+            Asset Folders
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {assetRows.map(([folder, count]) => (
+              <div key={folder} className="flex flex-col gap-1.5 p-4 rounded-xl border border-border bg-secondary">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Layers className="w-4 h-4 text-muted-foreground shrink-0" />
+                  <span className="text-sm font-medium truncate">{folder}</span>
+                </div>
+                <span className="text-2xl font-bold tabular-nums">{count}</span>
+                <span className="text-xs text-muted-foreground">files</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Meta */}
+      <div className="rounded-xl border border-border overflow-hidden">
+        <div className="px-5 py-3 bg-secondary text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+          Details
+        </div>
+        <div className="divide-y divide-border">
+          <div className="flex items-center justify-between px-5 py-3 text-sm">
+            <span className="text-muted-foreground">Exported at</span>
+            <span className="font-medium">{formatDate(run.exported_at)}</span>
+          </div>
+          <div className="flex items-center justify-between px-5 py-3 text-sm">
+            <span className="text-muted-foreground">Storage path</span>
+            <span className="font-mono text-xs text-muted-foreground">{run.storage_path}</span>
+          </div>
+          {run.notes && (
+            <div className="flex items-center justify-between px-5 py-3 text-sm">
+              <span className="text-muted-foreground">Notes</span>
+              <span className="font-medium">{run.notes}</span>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -304,11 +303,12 @@ export function ExportManager() {
     'Industry Sectors', 'Messaging',
   ];
 
+  if (statsRun) {
+    return <StatsView run={statsRun} onBack={() => setStatsRun(null)} />;
+  }
+
   return (
     <>
-      {/* Stats modal */}
-      {statsRun && <StatsModal run={statsRun} onClose={() => setStatsRun(null)} />}
-
       {/* Delete confirmation */}
       {deleteTarget && (
         <DeleteDialog
@@ -564,7 +564,7 @@ export function ExportManager() {
                       {/* Actions */}
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-1 justify-end">
-                          {/* Stats */}
+                          {/* Stats / contents */}
                           <button
                             onClick={() => setStatsRun(run)}
                             className="p-1.5 rounded text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
@@ -572,17 +572,6 @@ export function ExportManager() {
                           >
                             <BarChart2 className="w-4 h-4" />
                           </button>
-
-                          {/* Open in new tab */}
-                          <a
-                            href={run.public_url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="p-1.5 rounded text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
-                            title="Open in new tab"
-                          >
-                            <ExternalLink className="w-4 h-4" />
-                          </a>
 
                           {/* Delete */}
                           <button
