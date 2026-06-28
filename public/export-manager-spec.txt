@@ -1,0 +1,266 @@
+Build an Export Manager admin panel for a React + Supabase + Tailwind app (Vite, TypeScript, lucide-react icons). The panel lets an admin generate a complete ZIP backup of all app data and image/icon assets, upload it to Supabase Storage, and manage a history of past exports. No external ZIP libraries — build the ZIP entirely in-browser using typed arrays.
+
+---
+DATABASE
+---
+
+Run this migration:
+
+  CREATE TABLE export_runs (
+    id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    filename         text NOT NULL,
+    storage_path     text NOT NULL,
+    public_url       text NOT NULL,
+    file_size_bytes  bigint NOT NULL DEFAULT 0,
+    entity_counts    jsonb NOT NULL DEFAULT '{}',
+    asset_counts     jsonb NOT NULL DEFAULT '{}',
+    exported_by      uuid REFERENCES auth.users(id) ON DELETE SET NULL,
+    exported_at      timestamptz NOT NULL DEFAULT now(),
+    notes            text
+  );
+  ALTER TABLE export_runs ENABLE ROW LEVEL SECURITY;
+
+RLS: SELECT/INSERT/UPDATE/DELETE all restricted to authenticated users whose uid exists in a user_roles table with role = 'admin'. Also create an anon bypass policy for SELECT so the client can read history without a session if needed.
+
+Create a Supabase Storage bucket called "exports":
+  - public: true
+  - allowed MIME: application/zip, application/octet-stream
+  - file size limit: 104857600 (100 MB)
+  - Storage RLS: SELECT open to anon + authenticated; INSERT/DELETE restricted to admin role (same user_roles check)
+
+---
+FILE STRUCTURE
+---
+
+src/lib/exportUtils.ts       — ZIP builder, data fetchers, asset collector, upload+record, history CRUD, triggerDownload
+src/hooks/useExport.ts       — React hook managing progress state + history state + all async actions
+src/components/admin/ExportManager.tsx  — UI panel (three sub-components: NotesCell, StatsView, DeleteDialog + main ExportManager)
+
+---
+exportUtils.ts — FULL IMPLEMENTATION DETAILS
+---
+
+Types:
+
+  interface ExportManifest {
+    version: string;           // "1.0"
+    exported_at: string;       // ISO timestamp
+    source: string;            // app name
+    entity_counts: Record<string, number>;
+    asset_counts: Record<string, number>;
+  }
+
+  interface ExportRun {
+    id: string;
+    filename: string;
+    storage_path: string;
+    public_url: string;
+    file_size_bytes: number;
+    entity_counts: Record<string, number>;
+    asset_counts: Record<string, number>;
+    exported_by: string | null;
+    exported_at: string;
+    notes: string | null;
+  }
+
+ZIP builder — buildZip(entries: { name: string; data: Uint8Array }[]): Uint8Array
+  - No compression (method 0), version needed = 20
+  - CRC-32 computed with standard 0xEDB88320 polynomial, table cached after first call
+  - Each entry: local file header (PK\x03\x04) + raw data
+  - Central directory headers (PK\x01\x02) after all local entries
+  - End-of-central-directory record (PK\x05\x06) at end
+  - All multi-byte fields little-endian
+
+fetchAllEntities(onProgress: (msg: string) => void): Promise<{name: string; data: unknown[]}[]>
+  - SELECT * from each of these tables in order (skip on error, push empty array):
+    profiles, activity_types, engagement_events, points_ledger, levels, user_levels,
+    badge_constellations, badges, user_badges, quests, quest_steps, user_quest_progress,
+    challenges, user_challenge_progress, leaderboard_records, campaigns, scheduled_events,
+    rewards_catalog, reward_rules, journeys, journey_quests, user_journey_progress,
+    projects, project_levels, project_quests, project_challenges, project_reward_rules,
+    communities, community_members, pulses, ideas, idea_votes, gift_packs, announcements,
+    email_templates, email_footer_templates, email_schedules, icon_library_items,
+    icon_categories, image_library, admin_messages, notifications, industry_sectors,
+    sector_roles, user_roles
+  - Call onProgress("Fetching <table>...") before each fetch
+
+collectAssetEntries(entities, onProgress: (msg, done, total) => void): Promise<{path: string; data: Uint8Array}[]>
+  - Scan all entity rows, collect asset URLs into a deduplicated Map<url, destPath>:
+      badges + badge_constellations → row.icon_url and row.cover_image_url → "assets/badge-icons/<filename>"
+      icon_library_items → row.url → "assets/icon-library/<filename>"
+      image_library → row.public_url → "assets/image-library/<filename>"
+      everything else → row.icon_url → "assets/icons/<filename>"
+  - fetch() each URL, skip on error or non-ok response, store as Uint8Array
+  - Call onProgress("Downloading <filename>", i+1, total) for each
+
+uploadExportAndRecord(zipBytes, filename, manifest): Promise<ExportRun>
+  - Upload Uint8Array to Supabase Storage bucket "exports" at path "runs/<filename>"
+  - Get public URL via getPublicUrl
+  - Insert row into export_runs with all fields; exported_by = auth.uid() or null
+  - Return the inserted row
+
+fetchExportHistory(): Promise<ExportRun[]>
+  - SELECT * FROM export_runs ORDER BY exported_at DESC
+
+updateExportNotes(id, notes): Promise<void>
+  - UPDATE export_runs SET notes = ? WHERE id = ?
+
+deleteExportRun(run): Promise<void>
+  - storage.remove([run.storage_path])
+  - DELETE FROM export_runs WHERE id = run.id
+
+triggerDownload(url, filename): void
+  - Create <a href=url download=filename>, append to body, click, remove
+
+---
+useExport.ts HOOK
+---
+
+Manages two pieces of state:
+
+  ExportProgress {
+    isExporting: boolean
+    progress: number          // 0–100
+    statusMessage: string
+    error: string | null
+    latestRun: ExportRun | null
+  }
+
+  ExportHistoryState {
+    runs: ExportRun[]
+    loading: boolean
+    error: string | null
+  }
+
+startExport() — three phases:
+  Phase 1 (0→50%): fetchAllEntities, update statusMessage per table
+  Phase 2 (50→85%): collectAssetEntries, progress = 50 + round((done/total)*35)
+  Phase 3 (85→100%):
+    - Build entityCounts and assetCounts objects
+    - Build manifest (version "1.0", exported_at ISO, source = app name)
+    - Add manifest.json as first ZIP entry (pretty-printed JSON)
+    - Add data/<table>.json entries (pretty-printed JSON arrays)
+    - Add asset binary entries
+    - progress=92 "Building ZIP", buildZip()
+    - progress=95 "Uploading", uploadExportAndRecord()
+    - Set latestRun, isExporting=false, progress=100
+    - Prepend new run to history.runs
+  On catch: set error message, isExporting=false
+
+saveNotes(id, notes) — calls updateExportNotes, updates local history state optimistically
+deleteRun(run) — calls deleteExportRun, removes from local history state
+resetProgress() — resets progress state to initial
+loadHistory / refreshHistory — fetches history, sets loading/error state
+useEffect on mount: loadHistory()
+
+Filename format: "<appname>-export-<YYYY-MM-DD>-<HH-MM-SS>.zip"
+  e.g. const date = new Date().toISOString().slice(0,10)
+       const time = new Date().toISOString().slice(11,19).replace(/:/g,'-')
+
+---
+ExportManager.tsx — UI COMPONENTS
+---
+
+Helper functions at top of file:
+  formatBytes(bytes) — "X B" / "X.X KB" / "X.XX MB"
+  formatDate(iso) — toLocaleString with year/month/day/hour/minute
+
+== NotesCell({ run, onSave }) ==
+Inline editable notes cell.
+- Display mode: button showing notes text or italic "Add note..." placeholder; pencil icon appears on hover
+- Edit mode (triggered by clicking): text input (autoFocus, Enter=save, Escape=cancel) + green Check icon button + grey X icon button
+- onSave(id, notes) is async; show disabled state while saving
+
+== StatsView({ run, onBack }) ==
+Full-page view — replaces entire panel content, no modal overlay.
+
+Layout top to bottom:
+1. Back button: arrow-left icon + "Back to Export History"
+2. Header row: BarChart2 icon in primary-colored rounded box + "Export Contents" h2 + filename in monospace below; Download ZIP button (primary style) on the right
+3. Three summary stat tiles in a 3-column grid (border, rounded-xl, secondary background):
+     - Total Records (sum of all entity_counts values)
+     - Asset Files (sum of all asset_counts values)
+     - Archive Size (formatBytes)
+4. Horizontal bar chart — "Data Tables — N non-empty":
+   - One row per entity_counts entry where count > 0, sorted descending
+   - Each row: 48-char monospace label (underscores → spaces), flex-1 bar (bg-secondary, h-6, rounded-lg) with a filled primary/25 div at width = max(2, round(count/maxCount*100))%, count number overlaid as absolute text inside bar
+5. Asset Folders grid (2–4 columns responsive) — one card per asset_counts entry where count > 0:
+   - Layers icon + folder name + large count number + "files" label
+6. Details table (rounded border, divide-y):
+   - Exported at: formatDate
+   - Storage path: monospace small text
+   - Notes: shown only if present
+
+== DeleteDialog({ run, onConfirm, onCancel }) ==
+Modal overlay (fixed inset-0, backdrop blur, z-50).
+- Red trash icon in circle
+- "Delete Export?" heading
+- Body: "This will permanently remove the ZIP from storage and delete the history record. You cannot undo this."
+- Filename in monospace pill (secondary background, border)
+- Footer: Cancel button + "Delete permanently" button (destructive style)
+- onConfirm is async; show spinner in button while busy, disable both buttons
+
+== ExportManager() — main component ==
+
+State:
+  const [statsRun, setStatsRun] = useState<ExportRun | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<ExportRun | null>(null)
+
+If statsRun is set: return <StatsView run={statsRun} onBack={() => setStatsRun(null)} /> (replaces entire render)
+
+Otherwise render the full panel:
+
+  SECTION 1 — Panel header (always visible):
+    FileArchive icon in primary rounded box + "Export Full Backup" h2 + description text
+
+  SECTION 2 — "What's included" (visible only when !latestRun && !isExporting):
+    Left card (lg:col-span-2): two-column bullet list of 20 included data categories
+    Right card: monospace ZIP structure tree
+
+  SECTION 3 — Progress bar (visible when isExporting):
+    Spinner + "Exporting — please keep this tab open..."
+    statusMessage + percentage right-aligned
+    h-2 progress bar (primary fill, transition)
+
+  SECTION 4 — Error state (visible when error && !isExporting):
+    Red AlertCircle + "Export failed" + error message + "Try again" button (calls resetProgress)
+
+  SECTION 5 — Success card (visible when latestRun && !isExporting):
+    Green-tinted border + bg (border-green-500/30, bg-green-500/5)
+    CheckCircle icon + "Export complete" + filename
+    File size (HardDrive icon) right-aligned
+    Download button (full width, green border/bg, Download icon + filename + ExternalLink icon on right)
+    Grid of up to 12 record count tiles (table name + count, non-zero, sorted desc)
+    "New export" button (calls resetProgress)
+
+  SECTION 6 — CTA bar (visible when !isExporting && !latestRun):
+    "Ready to export" text + "Export Full Backup" button (calls startExport)
+
+  SECTION 7 — Export History (always visible):
+    Header: "Export History" + Refresh button (RotateCcw icon, disabled+spinning while loading)
+    Error state: red inline message if history.error
+    Loading skeleton: 3 animated pulse bars if loading && no runs
+    Empty state: dashed border box "No exports yet. Run your first export above."
+    Table (rounded-xl border, overflow-hidden) when runs.length > 0:
+      Columns: File | Date (hidden on mobile) | Size (hidden on tablet) | Notes | Actions
+      File cell: FileArchive icon + monospace filename button (triggers download on click) + Download icon visible on hover
+      Date cell: Clock icon + formatDate
+      Size cell: HardDrive icon + formatBytes
+      Notes cell: <NotesCell>
+      Actions cell (right-aligned, two icon buttons):
+        BarChart2 icon — onClick: setStatsRun(run) — title "View contents & statistics"
+        Trash2 icon — onClick: setDeleteTarget(run) — title "Delete export" — hover red
+
+  DeleteDialog rendered above the panel when deleteTarget is set.
+  On confirm: await deleteRun(deleteTarget), then setDeleteTarget(null)
+
+---
+DESIGN SYSTEM
+---
+- Use Tailwind CSS utility classes throughout
+- Color tokens: bg-card, bg-secondary, bg-background, border-border, text-foreground, text-muted-foreground, text-primary, bg-primary, text-primary-foreground, bg-accent, bg-destructive, text-destructive, text-destructive-foreground
+- Spacing: 8px grid (p-4, p-6, gap-4, etc.)
+- Rounded: rounded-lg (inputs/small), rounded-xl (cards/sections), rounded-2xl (modals)
+- Icons: lucide-react — Download, Package, Database, CheckCircle, AlertCircle, RefreshCw, FileArchive, Trash2, Pencil, X, Check, Clock, HardDrive, RotateCcw, BarChart2, Image, Layers, ArrowLeft
+- Transitions: transition-colors on all interactive elements
+- Hover states on all buttons and table rows
